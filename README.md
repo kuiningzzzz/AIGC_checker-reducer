@@ -1,2 +1,2 @@
 # code_developer
-
+食用方法：将文件前的load_dotenv方法中的参数改为虚拟环境中.env文件的绝对地址或相对地址
