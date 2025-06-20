@@ -17,13 +17,18 @@ load_dotenv("D:\\gitRepo\\camel\\.env")
 # 创建模型实例（启用流式响应）
 model = ModelFactory.create(
     model_platform=ModelPlatformType.DEEPSEEK,
-    model_type=ModelType.DEEPSEEK_REASONER,
+    model_type=ModelType.DEEPSEEK_CHAT,
     model_config_dict={"temperature": 0.0, "stream": True},  # 确保启用流模式
 )
 
 system_msg = BaseMessage.make_assistant_message(
     role_name="Assistant",
     content="你的职责是检测用户输入的文本是否是AI生成的内容。你的回复中禁止出现任何汉字、字母和标点符号。只允许你回复一个从0到100的数字，表示你认为用户输入的文本中AI生成的部分占多大的比重。0表示完全不是AI生成内容，100表示完全是AI生成内容。",
+)
+
+system_msg_reducer = BaseMessage.make_assistant_message(
+    role_name="Assistant",
+    content="你的职责是降低用户输入的文本中AI生成内容的比重。你只能回复以下内容：不改变用户输入的文本内容的原本含义的文本，但要使确保回复中AI生成内容的比重低于用户输入文本的比重。除此之外禁止多余的任何回复内容。",
 )
 
 class GUI:
@@ -49,11 +54,17 @@ class GUI:
             bg="LightSkyBlue",
             command=self.send
         )
+        self.reduce_btn = tk.Button(
+            self.root,
+            text="REDUCE",
+            font=self.font_of_btn,
+            bg="LightSkyBlue",
+            command=self.reduce
+        )
         self.send_btn.place(relx=0.9, rely=0.9, relwidth=0.05, relheight=0.05)
-        
         self.send_text = tk.Text(self.root)
-        self.send_text.place(relx=0.05, rely=0.9, relheight=0.05, relwidth=0.85)
-        
+        self.send_text.place(relx=0.05, rely=0.9, relheight=0.05, relwidth=0.8)
+        self.reduce_btn.place(relx=0.85, rely=0.9, relwidth=0.05, relheight=0.05)
         # 使用Text控件替代Label，支持多行显示和滚动
         self.ans_text = tk.Text(
             self.root, 
@@ -80,6 +91,7 @@ class GUI:
         if not user_input:
             return
         self.user_input = user_input
+        self.current_aigc_rate = ""
         self.send_text.delete('1.0', tk.END)  # 清空输入框
         self.is_streaming = True
         
@@ -89,7 +101,24 @@ class GUI:
         # 启动新线程处理流式响应
         threading.Thread(
             target=self.stream_response,
-            args=(),
+            args=(0,),
+            daemon=True
+        ).start()
+
+    def reduce(self):
+        print(self.current_aigc_rate)
+        if int(self.current_aigc_rate) < 30:
+            self.update_response("AIGC_reducer: 当前AIGC率低于30%，无需降低。\n", clear=False)
+            return
+        if self.is_streaming:
+            return
+        if not self.user_input:
+            return
+        self.is_streaming = True
+        self.update_response(f"AIGC_reducer: ", clear=False)
+        threading.Thread(
+            target=self.stream_response,
+            args=(1,),
             daemon=True
         ).start()
 
@@ -100,8 +129,12 @@ class GUI:
             user_msg = BaseMessage.make_user_message(role_name="User", content=self.user_input)
             
             # 构建消息列表
+            if mod == 0:
+                _system_msg = system_msg
+            elif mod == 1:
+                _system_msg = system_msg_reducer
             messages = [
-                {"role": "system", "content": system_msg.content},
+                {"role": "system", "content": _system_msg.content},
                 {"role": "user", "content": user_msg.content}
             ]
             
@@ -136,14 +169,11 @@ class GUI:
             self.response_queue.put(None)  # 流结束信号
             self.is_streaming = False
 
-    def process_queue(self, mod=0):
+    def process_queue(self):
         """主线程中处理队列内容（每100ms检查一次）"""
         try:
             while True:
                 chunk = self.response_queue.get_nowait()
-                if mod == 1:
-                    self.current_aigc_rate = ""  # 重置当前AIGC率
-                    mod = 0
                 if chunk is None:  # 流结束信号
                     self.update_response("\n\n", clear=False)
                     break
@@ -151,10 +181,9 @@ class GUI:
                 self.current_aigc_rate += chunk  # 累积当前AIGC率
                 self.update_response(chunk, clear=False)
         except queue.Empty:
-            if mod == 0:
-                mod = 1
+            pass
         
-        self.root.after(100, self.process_queue, mod)  # 继续循环
+        self.root.after(100, self.process_queue)  # 继续循环
 
     def update_response(self, text, clear=False):
         """更新响应文本框内容"""
