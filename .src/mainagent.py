@@ -98,6 +98,7 @@ class GUI:
         # 在文本框中添加用户消息
         self.update_response(f"You: {self.user_input}\n\nAIGC_checker: ", clear=False)
         
+        self.send_mod = True
         # 启动新线程处理流式响应
         threading.Thread(
             target=self.stream_response,
@@ -107,8 +108,8 @@ class GUI:
 
     def reduce(self):
         print(self.current_aigc_rate)
-        if int(self.current_aigc_rate) < 30:
-            self.update_response("AIGC_reducer: 当前AIGC率低于30%，无需降低。\n", clear=False)
+        if int(self.current_aigc_rate) < 25:
+            self.update_response("AIGC_reducer: 当前AIGC率低于25%，无需降低。\n", clear=False)
             return
         if self.is_streaming:
             return
@@ -154,6 +155,8 @@ class GUI:
                 if content_chunk:
                     full_response += content_chunk
                     self.response_queue.put(content_chunk)
+                    if self.send_mod:
+                        self.current_aigc_rate += content_chunk  # 累积当前AIGC率
             
             # 将完整响应添加到代理的消息历史
             assistant_msg = BaseMessage.make_assistant_message(
@@ -167,6 +170,7 @@ class GUI:
             self.response_queue.put(f"\n\nError: {str(e)}")
         finally:
             self.response_queue.put(None)  # 流结束信号
+            self.send_mod = False
             self.is_streaming = False
 
     def process_queue(self):
@@ -178,7 +182,6 @@ class GUI:
                     self.update_response("\n\n", clear=False)
                     break
                 self.current_response += chunk
-                self.current_aigc_rate += chunk  # 累积当前AIGC率
                 self.update_response(chunk, clear=False)
         except queue.Empty:
             pass
