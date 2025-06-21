@@ -211,7 +211,7 @@ class GUI:
         """处理降低模式完成后的逻辑"""
         # 更新用户输入为降低后的内容
         self.user_input = reduced_content
-        
+        self.current_aigc_rate = ""  # 清空AIGC率
         # 显示检测前缀
         while not queue.Empty:
             time.sleep(0.1)  # 等待队列处理完成
@@ -233,6 +233,7 @@ class GUI:
             while True:
                 chunk = self.response_queue.get_nowait()
                 if chunk is None:  # 流结束信号
+                    self.update_response(chunk, clear=False)
                     break
                 self.current_response += chunk
                 self.update_response(chunk, clear=False)
@@ -243,6 +244,8 @@ class GUI:
 
     def update_response(self, text, clear=False):
         """更新响应文本框内容"""
+        if text is None:
+            return
         self.ans_text.config(state=tk.NORMAL)  # 临时启用编辑
         
         if clear:
