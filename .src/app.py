@@ -6,6 +6,7 @@ import queue
 from model_agent import create_chat_agent, get_system_messages, stream_response, detect_injection, sanitize_input
 from camel.messages import BaseMessage
 from camel.types import OpenAIBackendRole
+import time
 
 class GUI:
     def __init__(self, agent):
@@ -53,7 +54,7 @@ class GUI:
         
         # 输入文本框
         self.send_text = tk.Text(self.root, height=3)
-        self.send_text.place(relx=0.05, rely=0.9, relheight=0.05, relwidth=0.8)
+        self.send_text.place(relx=0.05, rely=0.9, relheight=0.05, relwidth=0.75)
         
         # 响应文本框（带滚动条）
         self.ans_text = tk.Text(
@@ -75,6 +76,16 @@ class GUI:
         scrollbar = tk.Scrollbar(self.root, command=self.ans_text.yview)
         scrollbar.place(relx=0.95, rely=0.05, relheight=0.8, relwidth=0.02)
         self.ans_text.config(yscrollcommand=scrollbar.set)
+        
+        # 安全日志按钮
+        self.security_btn = tk.Button(
+            self.root,
+            text="SECURE",
+            font=self.font_of_btn,
+            bg="LightSalmon",
+            command=self.show_security_log
+        )
+        self.security_btn.place(relx=0.8, rely=0.9, relwidth=0.05, relheight=0.05)
 
     def send(self):
         """处理发送按钮点击事件，启动AIGC检测"""
@@ -86,11 +97,11 @@ class GUI:
             return
         # 检测指令注入
         if detect_injection(user_input):
-            self.security_log.append(f"检测到潜在指令注入: {user_input[:50]}...")
+            self.security_log.append(f"\n检测到潜在指令注入: {user_input[:50]}...")
             self.update_response("\n\n安全警报: 检测到可疑输入。已启动防护机制。\n", clear=False)
             # 清理输入内容
             user_input = sanitize_input(user_input)
-            self.update_response(f"清理后输入: {user_input}\n\n", clear=False)
+            self.update_response(f"\n清理后输入: {user_input}\n\n", clear=False)
         
         self.user_input = user_input
         self.current_aigc_rate = ""
@@ -98,7 +109,7 @@ class GUI:
         self.is_streaming = True
         
         # 在文本框中添加用户消息
-        self.root.after(0, lambda: self.update_response(f"You: {self.user_input}\n\nAIGC_checker: ", clear=False))
+        self.root.after(0, lambda: self.update_response(f"\n\nYou: {self.user_input}\n\nAIGC_checker: ", clear=False))
         
         self.send_mod = True
         # 启动新线程处理流式响应
@@ -202,6 +213,9 @@ class GUI:
         self.user_input = reduced_content
         
         # 显示检测前缀
+        while not queue.Empty:
+            time.sleep(0.1)  # 等待队列处理完成
+        time.sleep(0.1)
         self.update_response(f"\n\nAIGC_checker: ", clear=False)
         
         # 启动新检测
@@ -264,15 +278,5 @@ class GUI:
 if __name__ == "__main__":
     agent = create_chat_agent()
     gui = GUI(agent)
-    
-    # 添加安全日志按钮
-    security_btn = tk.Button(
-        gui.root,
-        text="SECURITY",
-        font=gui.font_of_btn,
-        bg="LightSalmon",
-        command=gui.show_security_log
-    )
-    security_btn.place(relx=0.8, rely=0.9, relwidth=0.05, relheight=0.05)
     
     gui.root.mainloop()
