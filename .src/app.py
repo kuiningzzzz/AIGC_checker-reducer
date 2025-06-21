@@ -3,7 +3,7 @@ import tkinter as tk
 import tkinter.font as font
 import threading
 import queue
-from model_agent import create_chat_agent, get_system_messages, stream_response,model
+from model_agent import create_chat_agent, get_system_messages, stream_response, detect_injection, sanitize_input
 from camel.messages import BaseMessage
 from camel.types import OpenAIBackendRole
 
@@ -25,6 +25,7 @@ class GUI:
         self.send_mod = False  # 标志位，表示是否处于发送状态
         self.reduce_mod = False  # 标志位，表示是否处于降低状态
         self.user_input = ""  # 存储用户输入
+        self.security_log = []  # 安全日志记录
 
     def interface(self):
         """创建和布局GUI界面元素"""
@@ -83,13 +84,21 @@ class GUI:
         user_input = self.send_text.get('1.0', 'end-1c').strip()  # 获取文本并移除首尾空白
         if not user_input:
             return
+        # 检测指令注入
+        if detect_injection(user_input):
+            self.security_log.append(f"检测到潜在指令注入: {user_input[:50]}...")
+            self.update_response("\n\n安全警报: 检测到可疑输入。已启动防护机制。\n", clear=False)
+            # 清理输入内容
+            user_input = sanitize_input(user_input)
+            self.update_response(f"清理后输入: {user_input}\n\n", clear=False)
+        
         self.user_input = user_input
         self.current_aigc_rate = ""
         self.send_text.delete('1.0', tk.END)  # 清空输入框
         self.is_streaming = True
         
         # 在文本框中添加用户消息
-        self.update_response(f"You: {self.user_input}\n\nAIGC_checker: ", clear=False)
+        self.root.after(0, lambda: self.update_response(f"You: {self.user_input}\n\nAIGC_checker: ", clear=False))
         
         self.send_mod = True
         # 启动新线程处理流式响应
@@ -103,12 +112,12 @@ class GUI:
         """处理降低按钮点击事件，启动AIGC内容降低"""
         # 检查是否有有效的AIGC率
         if not self.current_aigc_rate.isdigit():
-            self.update_response("AIGC_reducer: 请先进行AIGC检测\n", clear=False)
+            self.update_response("\n\nAIGC_reducer: 请先进行AIGC检测\n", clear=False)
             return
             
         # 检查AIGC率是否低于25%
         if int(self.current_aigc_rate) < 25:
-            self.update_response(f"AIGC_reducer: 当前AIGC率({self.current_aigc_rate}%)低于25%，无需降低。\n", clear=False)
+            self.update_response(f"\n\nAIGC_reducer: 当前AIGC率({self.current_aigc_rate}%)低于25%，无需降低。\n", clear=False)
             return
             
         if self.is_streaming:
@@ -116,13 +125,15 @@ class GUI:
             
         self.is_streaming = True
         self.current_reduce = ""
-        self.update_response(f"AIGC_reducer: ", clear=False)
+        self.update_response(f"\n\nAIGC_reducer: 正在降低AIGC内容比重...\n", clear=False)
+        
         self.reduce_mod = True
         threading.Thread(
             target=self.stream_response,
             args=(1,),
             daemon=True
         ).start()
+        self.security_log.append(f"降低请求 - 原始AIGC率: {self.current_aigc_rate}%")
 
     def stream_response(self, mod=0):
         """在后台线程中处理流式响应"""
@@ -130,11 +141,13 @@ class GUI:
             # 创建用户消息
             user_msg = BaseMessage.make_user_message(role_name="User", content=self.user_input)
             
+            system_msgs = get_system_messages()
+            
             # 根据模式选择系统消息
             if mod == 0:  # 检测模式
-                _system_msg = self.system_msgs["detector"]
+                _system_msg = system_msgs["detector"]
             elif mod == 1:  # 降低模式
-                _system_msg = self.system_msgs["reducer"]
+                _system_msg = system_msgs["reducer"]
             
             # 构建消息列表
             messages = [
@@ -143,23 +156,24 @@ class GUI:
             ]
             
             # 调用流式响应函数
-            stream = stream_response(model,messages)
+            stream = stream_response(messages)
             
             # 处理流式响应
             full_response = ""
             for chunk in stream:
-                if not chunk.choices:
-                    continue
-                    
-                # 获取内容块
-                content_chunk = chunk.choices[0].delta.content or ""
-                if content_chunk:
-                    full_response += content_chunk
-                    self.response_queue.put(content_chunk)
-                    if self.send_mod:
-                        self.current_aigc_rate += content_chunk  # 累积当前AIGC率
-                    if self.reduce_mod:
-                        self.current_reduce += content_chunk
+                # 将每个chunk放入队列
+                self.response_queue.put(chunk)
+                
+                # 累积完整响应
+                full_response += chunk
+                
+                # 在流处理过程中累积内容
+                if self.send_mod:
+                    self.current_aigc_rate += chunk
+                if self.reduce_mod:
+                    self.current_reduce += chunk
+            # 记录安全日志
+            self.security_log.append(f"模式{mod}响应: {full_response[:100]}{'...' if len(full_response)>100 else ''}")
             
             # 将完整响应添加到代理的消息历史
             assistant_msg = BaseMessage.make_assistant_message(
@@ -171,24 +185,33 @@ class GUI:
             
             # 如果是降低模式，完成后自动重新检测
             if self.reduce_mod:
-                self.send_mod = True
-                self.reduce_mod = False
-                self.user_input = self.current_reduce  # 更新用户输入为降低后的内容
-                self.update_response(f"\n\nReduced content: {self.current_reduce}\n\n", clear=False)
-                self.update_response(f"AIGC_checker: ", clear=False)
-                threading.Thread(
-                    target=self.stream_response,
-                    args=(0,),
-                    daemon=True
-                ).start()
+                self.root.after(0, self.handle_reduce_completion, full_response)
             
         except Exception as e:
             self.response_queue.put(f"\n\nError: {str(e)}")
+            self.security_log.append(f"错误: {str(e)}")
         finally:
             self.response_queue.put(None)  # 流结束信号
             self.send_mod = False
             self.reduce_mod = False
             self.is_streaming = False
+
+    def handle_reduce_completion(self, reduced_content):
+        """处理降低模式完成后的逻辑"""
+        # 更新用户输入为降低后的内容
+        self.user_input = reduced_content
+        
+        # 显示检测前缀
+        self.update_response(f"\n\nAIGC_checker: ", clear=False)
+        
+        # 启动新检测
+        self.send_mod = True
+        self.is_streaming = True
+        threading.Thread(
+            target=self.stream_response,
+            args=(0,),
+            daemon=True
+        ).start()
 
     def process_queue(self):
         """主线程中处理队列内容（每100ms检查一次）"""
@@ -196,14 +219,13 @@ class GUI:
             while True:
                 chunk = self.response_queue.get_nowait()
                 if chunk is None:  # 流结束信号
-                    self.update_response("\n\n", clear=False)
                     break
                 self.current_response += chunk
                 self.update_response(chunk, clear=False)
         except queue.Empty:
             pass
         
-        self.root.after(100, self.process_queue)  # 继续循环
+        self.root.after(50, self.process_queue)  # 继续循环
 
     def update_response(self, text, clear=False):
         """更新响应文本框内容"""
@@ -224,7 +246,33 @@ class GUI:
             pass
         self.root.destroy()
 
+    def show_security_log(self):
+        """显示安全日志（新增方法）"""
+        log_window = tk.Toplevel(self.root)
+        log_window.title("安全日志")
+        log_window.geometry("800x600")
+        
+        log_text = tk.Text(log_window, wrap=tk.WORD)
+        log_text.pack(expand=True, fill=tk.BOTH, padx=10, pady=10)
+        
+        log_text.insert(tk.END, "=== 安全日志 ===\n\n")
+        for entry in self.security_log:
+            log_text.insert(tk.END, f"- {entry}\n")
+        
+        log_text.config(state=tk.DISABLED)
+    
 if __name__ == "__main__":
     agent = create_chat_agent()
     gui = GUI(agent)
+    
+    # 添加安全日志按钮
+    security_btn = tk.Button(
+        gui.root,
+        text="SECURITY",
+        font=gui.font_of_btn,
+        bg="LightSalmon",
+        command=gui.show_security_log
+    )
+    security_btn.place(relx=0.8, rely=0.9, relwidth=0.05, relheight=0.05)
+    
     gui.root.mainloop()
